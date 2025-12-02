@@ -80,7 +80,6 @@ do
 end
 ```
 
-
 ### require 支持
 
 可以在一个文件中定义全局的宏变量或宏函数。当这个文件被其它文件的任意作用域 `require` 时，该文件中所有的全局宏变量/宏函数都将被导入 `require` 它的文件中。
@@ -180,3 +179,22 @@ local x, y = 1 + 3, 2 + 4
 ### 宏嵌套
 
 简单起见，没有实现宏嵌套功能。
+
+## 使用方法
+
+```sh
+./dlua /path/to/input /path/to/output
+# 如：
+# ./dlua ./input ./output
+```
+
+确保放置 `dlua` 的同级路径中存在 `dlua.json`，并手动为它配置项目的 load 路径，否则可能导致宏替换失败。
+
+示例的 `dlua.json`:
+
+```json
+{
+  "require_paths": ["all", "all-desktop", "kr1", "kr1-desktop", ".", "lib"]
+}
+```
+
