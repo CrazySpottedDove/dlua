@@ -51,16 +51,16 @@ fn main() {
     };
 
     // 记录当前时间
-    let _start_time = std::time::Instant::now();
+    // let _start_time = std::time::Instant::now();
     let proj = Project::load(&entry, require_paths, &export_path).expect("加载项目失败");
-    let _duration = _start_time.elapsed();
-    println!("项目加载完成，耗时: {:?}", _duration);
+    // let _duration = _start_time.elapsed();
+    // println!("项目加载完成，耗时: {:?}", _duration);
 
     // 再记录时间
-    let _start_time = std::time::Instant::now();
+    // let _start_time = std::time::Instant::now();
     let file_global_macros = ProjectGlobalMacros::new(&proj);
-    let _duration = _start_time.elapsed();
-    println!("全局宏收集完成，耗时: {:?}", _duration);
+    // let _duration = _start_time.elapsed();
+    // println!("全局宏收集完成，耗时: {:?}", _duration);
 
     let level_map: HashMap<String, u8> = HashMap::from([
         ("debug".to_string(), 0),
@@ -70,9 +70,11 @@ fn main() {
 
     let user_level = 1;
 
-    let _start_time = std::time::Instant::now();
+    // let _start_time = std::time::Instant::now();
     file_global_macros.expand_all_with_levels(&proj, user_level, &level_map, &export_path);
-    let _duration = _start_time.elapsed();
-    println!("宏展开完成，耗时: {:?}", _duration);
-    println!("{:?}", file_global_macros.macro_map);
+    // let _duration = _start_time.elapsed();
+    // println!("宏展开完成，耗时: {:?}", _duration);
+    // println!("{:?}", file_global_macros.macro_map);
+
+    log_info!("Project compiled to：{:?}", export_path);
 }
