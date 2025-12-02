@@ -1,0 +1,10 @@
+{
+    "require_paths": [
+        "all",
+        "all-desktop",
+        "kr1",
+        "kr1-desktop",
+        ".",
+        "lib"
+    ]
+}
