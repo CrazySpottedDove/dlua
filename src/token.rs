@@ -5,6 +5,8 @@ pub enum Token {
     // 指令注释
     #[regex(r"--\s*@macro[^\n]*", priority = 40)]
     MacroComment,
+    #[regex(r"--\s*@alias[^\n]*", priority = 40)]
+    AliasComment,
     #[regex(r"--\s*@if[^\n]*", priority = 39)]
     IfComment,
     #[regex(r"--\s*@endif[^\n]*", priority = 38)]
@@ -41,6 +43,8 @@ pub enum Token {
     UntilKw,
     #[token("return", priority = 30)]
     ReturnKw,
+    #[token("in", priority = 30)]
+    InKw,
     // require
     #[token("require", priority = 25)]
     Require,
@@ -53,8 +57,8 @@ pub enum Token {
     #[token(",", priority = 10)]
     Comma,
 
-    // 标识符
-    #[regex(r"[A-Za-z_][A-Za-z0-9_\.]*", priority = 5)]
+    // 广义标识符，允许点号和冒号的出现
+    #[regex(r"[A-Za-z_][A-Za-z0-9_\.:]*", priority = 5)]
     Ident,
 
     // 字符串（如果仍需 require 分析）

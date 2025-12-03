@@ -4,7 +4,7 @@ mod project;
 mod token;
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::macros::ProjectGlobalMacros;
+use crate::macros::Processor;
 use project::Project;
 use serde_json::Value;
 
@@ -17,6 +17,8 @@ fn main() {
         .nth(2)
         .expect("请提供导出路径作为第二个参数（必须为文件夹）");
     let export_path = PathBuf::from(export_path);
+
+    let full = std::env::args().any(|arg| arg == "--full");
 
     // 尝试解析当前目录的 dlua.json
     let _config_path = std::env::current_dir()
@@ -52,13 +54,13 @@ fn main() {
 
     // 记录当前时间
     // let _start_time = std::time::Instant::now();
-    let proj = Project::load(&entry, require_paths, &export_path).expect("加载项目失败");
+    let proj = Project::load(&entry, require_paths, &export_path, full).expect("加载项目失败");
     // let _duration = _start_time.elapsed();
     // println!("项目加载完成，耗时: {:?}", _duration);
 
     // 再记录时间
     // let _start_time = std::time::Instant::now();
-    let file_global_macros = ProjectGlobalMacros::new(&proj);
+    let mut processor = Processor::new(proj);
     // let _duration = _start_time.elapsed();
     // println!("全局宏收集完成，耗时: {:?}", _duration);
 
@@ -71,7 +73,7 @@ fn main() {
     let user_level = 1;
 
     // let _start_time = std::time::Instant::now();
-    file_global_macros.expand_all_with_levels(&proj, user_level, &level_map, &export_path);
+    processor.expand_all_with_levels(user_level, &level_map, &export_path);
     // let _duration = _start_time.elapsed();
     // println!("宏展开完成，耗时: {:?}", _duration);
     // println!("{:?}", file_global_macros.macro_map);

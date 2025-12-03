@@ -5,3 +5,5 @@
 /output
 /input
 dlua.json
+test/tmp
+.dlua_cache.json

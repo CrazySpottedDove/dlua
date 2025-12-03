@@ -1,16 +1,16 @@
-use crate::{log_info, log_warn, token::Token};
+use crate::{log_info, log_warn, macros::Macro, token::Token};
 use logos::Logos;
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 use serde_json;
+use walkdir::WalkDir;
 
 /// 每个文件的缓存信息：mtime（秒）和依赖列表
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -29,13 +29,74 @@ pub struct BuildCache {
 pub struct TokenWithText {
     pub kind: Token,
     pub text: String,
+    // 字节区间，用于定位
+    pub span: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+pub struct File {
+    pub path: PathBuf,
+    pub tokens: Vec<TokenWithText>,
+    pub scope_stack: Vec<HashMap<String, Macro>>,
+    pub shadow_stack: Vec<HashSet<String>>,
+    pub line_starts: Vec<usize>,
+    pub output: String,
+    pub parse_index: usize,
+}
+
+impl File {
+    pub fn new(path: &PathBuf, tokens: Vec<TokenWithText>) -> Self {
+        Self {
+            path: path.clone(),
+            tokens: tokens,
+            scope_stack: Vec::new(),
+            shadow_stack: Vec::new(),
+            line_starts: Vec::new(),
+            output: String::new(),
+            parse_index: 0,
+        }
+    }
+
+    pub fn line_col_from_pos(&self, pos: usize) -> (usize, usize) {
+        match self.line_starts.binary_search(&pos) {
+            Ok(line_idx) => (line_idx + 1, 1),
+            Err(0) => (1, pos + 1),
+            Err(idx) => {
+                let line = idx - 1;
+                let col = pos - self.line_starts[line] + 1;
+                (line + 1, col)
+            }
+        }
+    }
+
+    fn pos_for_token(&self, token: &TokenWithText) -> String {
+        let (line, col) = self.line_col_from_pos(token.span.start);
+        format!("{}:{}:{}", self.path.canonicalize().unwrap_or(self.path.clone()).display(), line, col)
+    }
+
+    pub fn pos_for_index(&self, index: usize)->String{
+        if self.tokens.is_empty(){
+            return format!("{}:1:1",self.path.canonicalize().unwrap_or(self.path.clone()).display());
+        }
+        if index < self.tokens.len(){
+            let token = &self.tokens[index];
+            self.pos_for_token(token)
+        }else{
+            let last_token = &self.tokens[self.tokens.len()-1];
+            self.pos_for_token(last_token)
+        }
+    }
+
+    pub fn current_pos(&self) -> String {
+        self.pos_for_index(self.parse_index)
+    }
 }
 
 /// Project：根目录 + 缓存 + 所有源码 token 与依赖关系
 #[derive(Debug)]
 pub struct Project {
     pub root: PathBuf,
-    pub files: HashMap<PathBuf, Vec<TokenWithText>>,
+    pub files: HashMap<PathBuf, File>,
     pub require_relations: HashMap<PathBuf, Vec<PathBuf>>, // 正向：file -> deps
     pub reverse_require: HashMap<PathBuf, Vec<PathBuf>>,   // 反向：file -> dependents
     pub cache: BuildCache,
@@ -49,6 +110,7 @@ impl Project {
         root: impl AsRef<std::path::Path>,
         require_paths: Option<Vec<String>>,
         export_path: &PathBuf,
+        full: bool,
     ) -> std::io::Result<Self> {
         let root_path = root.as_ref().to_path_buf();
         let cache_path = export_path.join(".dlua_cache.json");
@@ -60,7 +122,7 @@ impl Project {
             require_relations: HashMap::new(),
             reverse_require: HashMap::new(),
             cache: Self::load_cache(cache_path.to_str().unwrap_or(".dlua_cache.json")),
-            cache_path,
+            cache_path
         };
 
         let t0 = std::time::Instant::now();
@@ -77,42 +139,57 @@ impl Project {
             .map(|e| e.path().to_path_buf())
             .collect();
 
-        log_info!("Collected {} Lua files in {:.2?}", all_lua_files.len(), t0.elapsed());
+        log_info!(
+            "Collected {} Lua files in {:.2?}",
+            all_lua_files.len(),
+            t0.elapsed()
+        );
         let t1 = std::time::Instant::now();
 
-        // 查找变更文件（基于 cache 中记录的 mtime）
-        let changed_files = Self::find_changed_files(&all_lua_files, &project.cache);
-        log_info!("Found {} changed files", changed_files.len());
+        // 确定需要处理的文件列表
+        let to_tokenize: Vec<PathBuf> = if full {
+            all_lua_files.clone()
+        } else {
+            let changed_files = Self::find_changed_files(&all_lua_files, &project.cache);
+            log_info!("Found {} changed files", changed_files.len());
 
-        // 从 cache 恢复依赖关系（尽可能），以便后面计算受影响集合
-        for (path, file_cache) in &project.cache.files {
-            if project.require_relations.contains_key(path) {
-                continue;
-            }
-            if !file_cache.deps.is_empty() {
-                project
-                    .require_relations
-                    .insert(path.clone(), file_cache.deps.clone());
-                for dep in &file_cache.deps {
+            // 从 cache 恢复依赖关系（尽可能），以便后面计算受影响集合
+            for (path, file_cache) in &project.cache.files {
+                if project.require_relations.contains_key(path) {
+                    continue;
+                }
+                if !file_cache.deps.is_empty() {
                     project
-                        .reverse_require
-                        .entry(dep.clone())
-                        .or_insert_with(Vec::new)
-                        .push(path.clone());
+                        .require_relations
+                        .insert(path.clone(), file_cache.deps.clone());
+                    for dep in &file_cache.deps {
+                        project
+                            .reverse_require
+                            .entry(dep.clone())
+                            .or_insert_with(Vec::new)
+                            .push(path.clone());
+                    }
                 }
             }
-        }
+            let affected_set = Self::compute_affected_set(
+                &changed_files,
+                &project.require_relations,
+                &project.reverse_require,
+            );
+            affected_set.iter().cloned().collect()
+        };
 
-        // 计算受影响集合：对每个变更文件，递归包含它的依赖（向下）与被它依赖的文件（向上）
-        let affected_set = Self::compute_affected_set(&changed_files, &project.require_relations, &project.reverse_require);
-        log_info!("Total affected files (changed + transitive deps/owners): {}", affected_set.len());
+        log_info!(
+            "Total affected files (changed + transitive deps/owners): {}",
+            to_tokenize.len()
+        );
 
         // 并行读取与分词（对受影响的所有文件）
-        let to_tokenize: Vec<PathBuf> = affected_set.iter().cloned().collect();
-        let file_tokens: Vec<(PathBuf, Vec<TokenWithText>)> = to_tokenize
+        let files: Vec<(PathBuf, File)> = to_tokenize
             .par_iter()
             .filter_map(|path| {
                 let code = fs::read_to_string(path).ok()?;
+                let line_starts = compute_line_starts(&code);
                 let mut lexer = Token::lexer(&code);
                 let mut tokens_with_text = Vec::new();
                 let src = lexer.source();
@@ -121,47 +198,59 @@ impl Project {
                         Ok(token) => {
                             let span = lexer.span();
                             let text = src[span.start..span.end].to_string();
-                            tokens_with_text.push(TokenWithText { kind: token, text });
+                            tokens_with_text.push(TokenWithText {
+                                kind: token,
+                                text,
+                                span: span.start..span.end,
+                            });
                         }
                         Err(_) => {
                             // 忽略单个 token 错误；日志留给主线程
                         }
                     }
                 }
-                Some((path.clone(), tokens_with_text))
+                let mut file = File::new(path, tokens_with_text);
+                file.line_starts = line_starts;
+                Some((path.clone(), file))
             })
             .collect();
 
         // 合并分词结果到 project.files（覆盖或新增）
-        for (path, tokens) in file_tokens {
-            project.files.insert(path, tokens);
+        for (path, file) in files {
+            project.files.insert(path, file);
         }
 
-        log_info!("Tokenized {} Lua files in {:.2?}", project.files.len(), t1.elapsed());
+        log_info!(
+            "Tokenized {} Lua files in {:.2?}",
+            project.files.len(),
+            t1.elapsed()
+        );
 
         // 解析依赖关系：对刚分词的文件解析 require，并更新 require_relations / reverse_require / cache
         let require_paths = require_paths.unwrap_or_else(|| vec![".".to_string()]);
         let mut unresolved_requires: HashSet<PathBuf> = HashSet::new();
 
-        for (file, tokens) in &project.files {
+        for (path, file) in &project.files {
             let mut deps: Vec<PathBuf> = Vec::new();
-            for req in Self::get_required_modules(tokens) {
-                if let Some(dep_path) = project.resolve_require(&req, &require_paths, &mut unresolved_requires) {
+            for req in Self::get_required_modules(&file.tokens) {
+                if let Some(dep_path) =
+                    project.resolve_require(&req, &require_paths, &mut unresolved_requires)
+                {
                     deps.push(dep_path.clone());
                     project
                         .require_relations
-                        .entry(file.clone())
+                        .entry(path.clone())
                         .or_insert_with(Vec::new)
                         .push(dep_path.clone());
                     project
                         .reverse_require
                         .entry(dep_path)
                         .or_insert_with(Vec::new)
-                        .push(file.clone());
+                        .push(path.clone());
                 }
             }
             // 更新内存缓存
-            Self::update_cache(&mut project.cache, file, deps);
+            Self::update_cache(&mut project.cache, path, deps);
         }
 
         // 对于仍然没有 require_relations 的文件（未分词且在 cache 中存在），恢复 cache 中的 deps
@@ -247,7 +336,10 @@ impl Project {
                         require_found = false;
                         require_left_paren = false;
                     } else {
-                        log_warn!("skip dynamic require {} in module parsing", token_with_text.text);
+                        log_warn!(
+                            "skip dynamic require {} in module parsing",
+                            token_with_text.text
+                        );
                         require_found = false;
                         require_left_paren = false;
                     }
@@ -258,7 +350,12 @@ impl Project {
     }
 
     /// 解析 require 名称到实际文件路径（支持 search_paths 中带 '?' 或不带）
-    fn resolve_require(&self, req: &str, search_paths: &[String], unresolved_requires: &mut HashSet<PathBuf>) -> Option<PathBuf> {
+    fn resolve_require(
+        &self,
+        req: &str,
+        search_paths: &[String],
+        unresolved_requires: &mut HashSet<PathBuf>,
+    ) -> Option<PathBuf> {
         let base_dir = &self.root;
         #[cfg(target_os = "windows")]
         let module_path = req.replace('.', "\\");
@@ -340,6 +437,17 @@ impl Project {
         let mtime = Self::get_mtime(file);
         cache.files.insert(file.clone(), FileCache { mtime, deps });
     }
+}
+
+fn compute_line_starts(src: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(128);
+    starts.push(0);
+    for (i, &b) in src.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
 }
 
 impl Drop for Project {
